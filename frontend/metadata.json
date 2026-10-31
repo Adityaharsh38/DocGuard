@@ -1,0 +1,6 @@
+{
+  "name": "DocGuard",
+  "description": "Automated documentation drift detection dashboard for analyzing GitHub pull requests against code changes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
