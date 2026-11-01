@@ -1,15 +1,14 @@
-
 import httpx
 
 from app.services.github_service import (
     GitHubService,
     GitHubServiceError,
-    parse_github_url
+    parse_github_url,
 )
 from app.services.diff_service import analyze_changed_files
 from app.services.code_analyzer import (
     analyze_python_code,
-    compare_code_analyses
+    compare_code_analyses,
 )
 from app.services.docs_mapper import map_documentation
 from app.services.ai_service import (
@@ -35,7 +34,7 @@ class AnalysisService:
         owner: str,
         repo: str,
         ref: str,
-        limit: int = 30
+        limit: int = 30,
     ) -> list:
         """Fetch Markdown documentation files from the PR head."""
 
@@ -46,13 +45,12 @@ class AnalysisService:
 
         async with httpx.AsyncClient(
             timeout=30.0,
-            headers=self.github.headers
+            headers=self.github.headers,
         ) as client:
-
             tree = await self.github._make_request(
                 client,
                 tree_url,
-                params={"recursive": "1"}
+                params={"recursive": "1"},
             )
 
         if tree.get("truncated"):
@@ -65,9 +63,7 @@ class AnalysisService:
             item["path"]
             for item in tree.get("tree", [])
             if item.get("type") == "blob"
-            and item["path"].lower().endswith(
-                (".md", ".mdx", ".rst")
-            )
+            and item["path"].lower().endswith((".md", ".mdx", ".rst"))
             and not any(
                 part.startswith(".")
                 for part in item["path"].split("/")
@@ -80,7 +76,7 @@ class AnalysisService:
                 0 if path.lower().endswith("readme.md") else
                 1 if path.lower().startswith("docs/") else
                 2,
-                path
+                path,
             )
         )
 
@@ -92,12 +88,12 @@ class AnalysisService:
                     owner,
                     repo,
                     path,
-                    ref
+                    ref,
                 )
 
                 documentation_files.append({
                     "filename": path,
-                    "content": content
+                    "content": content,
                 })
 
             except GitHubServiceError:
@@ -108,7 +104,7 @@ class AnalysisService:
     async def analyze_pull_request(
         self,
         repo_url: str,
-        pr_number: int
+        pr_number: int,
     ) -> dict:
         """Run the complete DocGuard analysis pipeline."""
 
@@ -116,22 +112,19 @@ class AnalysisService:
             # 1. Fetch PR metadata and changed files.
             pr = await self.github.fetch_pull_request(
                 repo_url,
-                pr_number
+                pr_number,
             )
 
             owner, repo = parse_github_url(repo_url)
 
             # 2. Parse PR patches.
-            diff_result = analyze_changed_files(
-                pr["changed_files"]
-            )
+            diff_result = analyze_changed_files(pr["changed_files"])
 
             # 3. Compare actual Python code at base and head.
             code_analyses = []
             changed_facts = []
 
             for file in diff_result["source_files"]:
-
                 filename = file["filename"]
 
                 # Deleted files have no current head version.
@@ -143,12 +136,12 @@ class AnalysisService:
                         owner,
                         repo,
                         filename,
-                        pr["head_sha"]
+                        pr["head_sha"],
                     )
 
                     head_analysis = analyze_python_code(
                         head_source,
-                        filename
+                        filename,
                     )
 
                     try:
@@ -156,12 +149,12 @@ class AnalysisService:
                             owner,
                             repo,
                             filename,
-                            pr["base_sha"]
+                            pr["base_sha"],
                         )
 
                         base_analysis = analyze_python_code(
                             base_source,
-                            filename
+                            filename,
                         )
 
                     except GitHubServiceError:
@@ -175,14 +168,14 @@ class AnalysisService:
                             "functions": [],
                             "classes": [],
                             "cli_arguments": [],
-                            "configurations": []
+                            "configurations": [],
                         }
 
                     code_analyses.append(head_analysis)
 
                     file_changes = compare_code_analyses(
                         base_analysis,
-                        head_analysis
+                        head_analysis,
                     )
 
                     changed_facts.extend(file_changes)
@@ -196,26 +189,23 @@ class AnalysisService:
             documentation_files = await self._fetch_repository_docs(
                 owner,
                 repo,
-                pr["head_sha"]
+                pr["head_sha"],
             )
 
             # 5. Map changed code facts to documentation.
             mappings = map_documentation(
                 changed_facts,
-                documentation_files
+                documentation_files,
             )
 
             mapping_result = {
                 "total_code_facts": len(changed_facts),
                 "mapped_facts": len(mappings),
-                "unmapped_facts": (
-                    len(changed_facts) - len(mappings)
-                ),
-                "mappings": mappings
+                "unmapped_facts": len(changed_facts) - len(mappings),
+                "mappings": mappings,
             }
 
-            
-            # 6. Verify ALL documentation matches together.
+            # 6. Verify documentation matches.
             findings = []
             total_qwen_requests = 0
 
@@ -226,7 +216,18 @@ class AnalysisService:
             print("Documentation files:", len(documentation_files))
             print("Mapped facts:", len(mappings))
 
-            # Keep only mappings containing documentation matches.
+            # Print facts before AI verification. This confirms whether
+            # function_behavior facts actually reach the documentation mapper.
+            print("\n========== CHANGED FACTS ==========")
+            for fact in changed_facts:
+                print(
+                    "KIND:", fact.get("kind"),
+                    "| SYMBOL:", fact.get("symbol"),
+                    "| PREVIOUS:", str(fact.get("previous_value"))[:500],
+                    "| ACTUAL:", str(fact.get("actual_value"))[:500],
+                )
+            print("===================================\n")
+
             active_mappings = [
                 mapping
                 for mapping in mappings
@@ -234,25 +235,55 @@ class AnalysisService:
             ]
 
             if active_mappings:
-
-                # One method call handles all mappings.
-                ai_results = (
-                    await self.ai.verify_all_documentation_batches(
-                        active_mappings
-                    )
+                ai_results = await self.ai.verify_all_documentation_batches(
+                    active_mappings
                 )
 
                 total_documentation_matches = sum(
                     len(mapping.get("documentation_matches", []))
                     for mapping in active_mappings
                 )
+
                 total_qwen_requests = (
                     total_documentation_matches
                     + MAX_MATCHES_PER_BATCH - 1
                 ) // MAX_MATCHES_PER_BATCH
 
-                for mapping_result_item in ai_results:
+                # Diagnostic output: show exactly which facts Qwen assessed
+                # and why a result may later be filtered out.
+                print("\n========== AI VERIFICATION RESULTS ==========")
 
+                for item in ai_results:
+                    mapping_index = item.get("mapping_id")
+
+                    if (
+                        not isinstance(mapping_index, int)
+                        or isinstance(mapping_index, bool)
+                        or mapping_index < 0
+                        or mapping_index >= len(active_mappings)
+                    ):
+                        print("INVALID MAPPING ID:", mapping_index)
+                        continue
+
+                    mapping = active_mappings[mapping_index]
+
+                    print(
+                        "\nFACT:", mapping.get("kind"),
+                        "| SYMBOL:", mapping.get("symbol"),
+                    )
+
+                    for result in item.get("results", []):
+                        print("MATCH ID:", result.get("match_id"))
+                        print("OUTDATED:", result.get("is_outdated"))
+                        print("SEVERITY:", result.get("severity"))
+                        print("CONFIDENCE:", result.get("confidence"))
+                        print("EXPLANATION:", result.get("explanation"))
+                        print("DOCUMENTED:", result.get("documented_value"))
+                        print("ACTUAL:", result.get("actual_value"))
+
+                print("==============================================\n")
+
+                for mapping_result_item in ai_results:
                     mapping_index = mapping_result_item["mapping_id"]
 
                     if (
@@ -264,11 +295,11 @@ class AnalysisService:
                     mapping = active_mappings[mapping_index]
 
                     documentation_matches = mapping.get(
-                        "documentation_matches", []
+                        "documentation_matches",
+                        [],
                     )
 
                     for ai_result in mapping_result_item["results"]:
-
                         match_id = ai_result.get("match_id")
 
                         if (
@@ -277,16 +308,26 @@ class AnalysisService:
                             or match_id < 0
                             or match_id >= len(documentation_matches)
                         ):
+                            print("SKIPPED: invalid match_id:", match_id)
                             continue
 
                         doc_match = documentation_matches[match_id]
 
                         if not ai_result.get("is_outdated", False):
+                            print(
+                                "FILTERED: AI marked current documentation",
+                                "| FACT:", mapping.get("symbol"),
+                            )
                             continue
 
                         confidence = ai_result.get("confidence", 0)
 
                         if confidence < 0.70:
+                            print(
+                                "FILTERED: confidence below 0.70",
+                                "| FACT:", mapping.get("symbol"),
+                                "| CONFIDENCE:", confidence,
+                            )
                             continue
 
                         findings.append({
@@ -301,26 +342,28 @@ class AnalysisService:
                             "code_line": mapping["source_line"],
                             "explanation": ai_result["explanation"],
                             "suggestion": ai_result["suggestion"],
-                            "confidence": confidence
+                            "confidence": confidence,
                         })
 
             print("Total Qwen batch requests:", total_qwen_requests)
             print("Total findings:", len(findings))
             print("==========================================\n")
 
-
             # 7. Prepare summary.
             summary = {
                 "total_findings": len(findings),
                 "high": sum(
-                    f["severity"] == "high" for f in findings
+                    finding["severity"] == "high"
+                    for finding in findings
                 ),
                 "medium": sum(
-                    f["severity"] == "medium" for f in findings
+                    finding["severity"] == "medium"
+                    for finding in findings
                 ),
                 "low": sum(
-                    f["severity"] == "low" for f in findings
-                )
+                    finding["severity"] == "low"
+                    for finding in findings
+                ),
             }
 
             # 8. Return API response.
@@ -334,13 +377,11 @@ class AnalysisService:
                 "analysis": {
                     "changed_files": pr["changed_files_count"],
                     "python_files_analyzed": len(code_analyses),
-                    "documentation_files_scanned": len(
-                        documentation_files
-                    ),
+                    "documentation_files_scanned": len(documentation_files),
                     "code_facts": mapping_result["total_code_facts"],
                     "mapped_facts": mapping_result["mapped_facts"],
-                    "qwen_requests": total_qwen_requests
-                }
+                    "qwen_requests": total_qwen_requests,
+                },
             }
 
         except (GitHubServiceError, AIServiceError) as error:
